@@ -2,80 +2,154 @@
 pragma solidity ^0.8.20;
 
 /*
- WRTS — Wrapped RTS
- Native RTS Wrapper for RECCNETWORK Blockchain
-(Genesis Asset Wrapper)
+    WRTS — Wrapped RTS
+    RECCNETWORK Native Wrapper
 
- - ERC20 compatible
- - 1:1 backing with native RTS
- - Required for AMM / Swap / Liquidity
- - Similar to WETH / WAVAX / WMATIC
- - Production ready
+    STANDARDS:
+    - IRECC-01  Token Standard
+    - IRECC-02  dApp / Web3 Compatibility
+    - IRECC-03  Signature / Security Layer
 
- Author: RECCNETWORK Blockchain Ecosystem
+    100% EVM Compatible
 */
 
 contract WRTS {
 
     /* =====================================================
-                        ERC20 METADATA
+                        METADATA
     ===================================================== */
-    string public name = "Wrapped RTS";
-    string public symbol = "WRTS";
+
+    string public constant name = "Wrapped RTS";
+    string public constant symbol = "WRTS";
     uint8 public constant decimals = 18;
 
+    string public constant STANDARD_1 = "IRECC-01";
+    string public constant STANDARD_2 = "IRECC-02";
+    string public constant STANDARD_3 = "IRECC-03";
+
+    string public constant NETWORK = "RECCNETWORK";
+
     uint256 public totalSupply;
+
+    /* =====================================================
+                        REENTRANCY LOCK
+    ===================================================== */
+
+    uint256 private unlocked = 1;
+
+    modifier lock() {
+        require(unlocked == 1, "LOCKED");
+        unlocked = 2;
+        _;
+        unlocked = 1;
+    }
+
+    /* =====================================================
+                        ERC20 STORAGE
+    ===================================================== */
 
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
     /* =====================================================
+                        IRECC-03 SIGNATURE
+    ===================================================== */
+
+    mapping(address => uint256) public nonces;
+
+    bytes32 public immutable DOMAIN_SEPARATOR;
+
+    bytes32 public constant PERMIT_TYPEHASH =
+        keccak256(
+            "Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)"
+        );
+
+    /* =====================================================
                         EVENTS
     ===================================================== */
+
     event Approval(address indexed owner, address indexed spender, uint256 value);
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Deposit(address indexed user, uint256 amount);
     event Withdrawal(address indexed user, uint256 amount);
 
     /* =====================================================
+                        CONSTRUCTOR
+    ===================================================== */
+
+    constructor() {
+        uint256 chainId;
+        assembly {
+            chainId := chainid()
+        }
+
+        DOMAIN_SEPARATOR = keccak256(
+            abi.encode(
+                keccak256(
+                    "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+                ),
+                keccak256(bytes(name)),
+                keccak256(bytes("1")),
+                chainId,
+                address(this)
+            )
+        );
+    }
+
+    /* =====================================================
                         RECEIVE RTS
     ===================================================== */
+
     receive() external payable {
         deposit();
     }
 
     /* =====================================================
-                        DEPOSIT (RTS → WRTS)
+                        DEPOSIT
     ===================================================== */
-    function deposit() public payable {
-        require(msg.value > 0, "WRTS: zero deposit");
-        balanceOf[msg.sender] += msg.value;
-        totalSupply += msg.value;
 
-        emit Deposit(msg.sender, msg.value);
-        emit Transfer(address(0), msg.sender, msg.value);
+    function deposit() public payable {
+        _mint(msg.sender, msg.value);
+    }
+
+    function depositTo(address to) external payable {
+        _mint(to, msg.value);
+    }
+
+    function _mint(address to, uint256 amount) internal {
+        require(amount > 0, "ZERO");
+
+        balanceOf[to] += amount;
+        totalSupply += amount;
+
+        emit Deposit(to, amount);
+        emit Transfer(address(0), to, amount);
     }
 
     /* =====================================================
-                        WITHDRAW (WRTS → RTS)
+                        WITHDRAW
     ===================================================== */
-    function withdraw(uint256 amount) external {
-        require(balanceOf[msg.sender] >= amount, "WRTS: insufficient balance");
+
+    function withdraw(uint256 amount) external lock {
+        require(balanceOf[msg.sender] >= amount, "INSUFFICIENT");
 
         balanceOf[msg.sender] -= amount;
         totalSupply -= amount;
 
-        payable(msg.sender).transfer(amount);
+        (bool ok, ) = payable(msg.sender).call{value: amount}("");
+        require(ok, "RTS_SEND_FAIL");
 
         emit Withdrawal(msg.sender, amount);
         emit Transfer(msg.sender, address(0), amount);
     }
 
     /* =====================================================
-                        ERC20 LOGIC
+                        ERC20
     ===================================================== */
+
     function approve(address spender, uint256 value) external returns (bool) {
         allowance[msg.sender][spender] = value;
+
         emit Approval(msg.sender, spender, value);
         return true;
     }
@@ -87,17 +161,64 @@ contract WRTS {
 
     function transferFrom(address from, address to, uint256 value) external returns (bool) {
         uint256 allowed = allowance[from][msg.sender];
+
         if (allowed != type(uint256).max) {
             allowance[from][msg.sender] = allowed - value;
         }
+
         _transfer(from, to, value);
         return true;
     }
 
     function _transfer(address from, address to, uint256 value) internal {
-        require(balanceOf[from] >= value, "WRTS: insufficient balance");
+        require(to != address(0), "ZERO_ADDR");
+        require(balanceOf[from] >= value, "BALANCE");
+
         balanceOf[from] -= value;
         balanceOf[to] += value;
+
         emit Transfer(from, to, value);
+    }
+
+    /* =====================================================
+                        IRECC-03 PERMIT
+    ===================================================== */
+
+    function permit(
+        address owner,
+        address spender,
+        uint256 value,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external {
+
+        require(deadline >= block.timestamp, "EXPIRED");
+
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                "\x19\x01",
+                DOMAIN_SEPARATOR,
+                keccak256(
+                    abi.encode(
+                        PERMIT_TYPEHASH,
+                        owner,
+                        spender,
+                        value,
+                        nonces[owner]++,
+                        deadline
+                    )
+                )
+            )
+        );
+
+        address recovered = ecrecover(digest, v, r, s);
+
+        require(recovered != address(0) && recovered == owner, "INVALID_SIG");
+
+        allowance[owner][spender] = value;
+
+        emit Approval(owner, spender, value);
     }
 }
